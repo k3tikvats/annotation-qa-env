@@ -33,11 +33,10 @@ packages = [
     "annotation_qa_env.server",
     "annotation_qa_env.data",
 ]
-package-dir = {
-    "annotation_qa_env" = ".",
-    "annotation_qa_env.server" = "server",
-    "annotation_qa_env.data" = "data",
-}
+[tool.setuptools.package-dir]
+"annotation_qa_env" = "."
+"annotation_qa_env.server" = "server"
+"annotation_qa_env.data" = "data"
 
 [tool.setuptools.package-data]
 "annotation_qa_env.data" = ["tasks/**/*.json"]
