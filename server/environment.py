@@ -301,6 +301,14 @@ class AnnotationQAEnvironment:
         """Clean up environment resources."""
         pass
 
+    async def reset_async(self, **kwargs) -> AnnotationQAObservation:
+        """Async wrapper for reset (required by OpenEnv server interface)."""
+        return self.reset(**kwargs)
+
+    async def step_async(self, action: AnnotationQAAction, **kwargs) -> AnnotationQAObservation:
+        """Async wrapper for step (required by OpenEnv server interface)."""
+        return self.step(action, **kwargs)
+
     # ──────────────────────────────────────────
     # Action handlers
     # ──────────────────────────────────────────
