@@ -88,6 +88,30 @@ TASK_CONFIGS = {
         "max_steps": 30,
         "data_file": "task3_batch_audit/samples.json",
     },
+    "easy_safety": {
+        "description": (
+            "Safety & Policy Violation. Flag any objects that violate the 'No humans allowed' policy."
+        ),
+        "difficulty": "easy_safety",
+        "max_steps": 15,
+        "data_file": "task1_fix_bboxes/samples.json",
+    },
+    "medium_attributes": {
+        "description": (
+            "Attribute & Caption Audit. Boxes may have wrong color prefixes (e.g. 'red car' instead of 'blue car'). Correct wrong attributes."
+        ),
+        "difficulty": "medium_attributes",
+        "max_steps": 20,
+        "data_file": "task2_fix_classes/samples.json",
+    },
+    "hard_missing": {
+        "description": (
+            "Missing Contextual Annotations. Substantial bounding boxes have been entirely stripped from the image. Identify the missing objects."
+        ),
+        "difficulty": "hard_missing",
+        "max_steps": 30,
+        "data_file": "task3_batch_audit/samples.json",
+    },
 }
 
 
@@ -162,8 +186,8 @@ class AnnotationQAEnvironment:
         # Select a random sample
         rng = random.Random(seed) if seed is not None else random.Random()
 
-        if task_id == "batch_audit":
-            # For batch audit, pick a random batch and use its first scene
+        if "batch_audit" in self._task_config["data_file"]:
+            # For data using the batch schema, pick a random batch and use its first scene
             batch = rng.choice(data)
             scene = batch["scenes"][0]
             sample_seed = scene.get("seed", rng.randint(0, 99999))
@@ -246,6 +270,12 @@ class AnnotationQAEnvironment:
                 error_msg = self._handle_remove_annotation(action)
             elif action.action_type == "submit":
                 return self._handle_submit()
+            elif action.action_type == "flag_safety":
+                error_msg = self._handle_flag_safety(action)
+            elif action.action_type == "change_attribute":
+                error_msg = self._handle_change_attribute(action)
+            elif action.action_type == "flag_missing":
+                error_msg = self._handle_flag_missing(action)
             else:
                 error_msg = f"Unknown action_type: {action.action_type}"
         except Exception as e:
@@ -256,12 +286,19 @@ class AnnotationQAEnvironment:
             self._state.corrections_made = self._corrections_made
 
         # Compute reward
-        reward = compute_step_reward(
-            old_annotations,
-            self._current_annotations,
-            self._gold_annotations,
-            action.action_type,
-        )
+        if action.action_type == "flag_safety" and not error_msg:
+            reward = 0.20
+        elif action.action_type == "change_attribute" and not error_msg:
+            reward = 0.15
+        elif action.action_type == "flag_missing" and not error_msg:
+            reward = 0.25
+        else:
+            reward = compute_step_reward(
+                old_annotations,
+                self._current_annotations,
+                self._gold_annotations,
+                action.action_type,
+            )
 
         # Update quality tracking
         current_quality = compute_annotation_quality(
@@ -407,6 +444,37 @@ class AnnotationQAEnvironment:
                 f"{self._state.step_count} steps."
             ),
         )
+
+    def _handle_flag_safety(self, action: AnnotationQAAction) -> Optional[str]:
+        if action.annotation_id is None:
+            return "annotation_id is required for flag_safety"
+        ann = self._find_annotation(action.annotation_id)
+        if ann is None: return "Annotation not found"
+        # We don't change state, just append tracking metadata for the grader
+        ann["safety_flagged"] = True
+        return None
+
+    def _handle_change_attribute(self, action: AnnotationQAAction) -> Optional[str]:
+        if action.annotation_id is None:
+            return "annotation_id is required for change_attribute"
+        if not action.new_attribute:
+            return "new_attribute is required"
+        ann = self._find_annotation(action.annotation_id)
+        if ann is None: return "Annotation not found"
+        ann["class_label"] = action.new_attribute
+        return None
+
+    def _handle_flag_missing(self, action: AnnotationQAAction) -> Optional[str]:
+        if not action.missing_class:
+            return "missing_class is required for flag_missing"
+        # Flagging missing class adds a placeholder marker
+        self._current_annotations.append({
+            "id": self._next_ann_id,
+            "bbox": [0,0,0,0],
+            "class_label": f"missing_{action.missing_class}"
+        })
+        self._next_ann_id += 1
+        return None
 
     # ──────────────────────────────────────────
     # Helpers

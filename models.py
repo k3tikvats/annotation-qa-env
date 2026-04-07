@@ -51,9 +51,12 @@ class AnnotationQAAction(BaseModel):
     action_type: Literal[
         "adjust_bbox",
         "change_class",
-        "add_annotation",
         "remove_annotation",
+        "add_annotation",
         "submit",
+        "flag_safety",
+        "change_attribute",
+        "flag_missing",
     ]
     annotation_id: Optional[int] = Field(
         None, description="ID of the annotation to modify"
@@ -66,6 +69,12 @@ class AnnotationQAAction(BaseModel):
     )
     new_class: Optional[str] = Field(
         None, description="New class label"
+    )
+    new_attribute: Optional[str] = Field(
+        None, description="New attribute description for an object"
+    )
+    missing_class: Optional[str] = Field(
+        None, description="Class of an object that was missing bounding boxes"
     )
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

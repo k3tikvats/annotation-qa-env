@@ -48,8 +48,8 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-VL-72B-Instruct")
 
 BENCHMARK = "annotation_qa_env"
-TASKS = ["fix_bboxes", "fix_classes", "batch_audit"]
-MAX_STEPS_PER_TASK = {"fix_bboxes": 15, "fix_classes": 20, "batch_audit": 30}
+TASKS = ["fix_bboxes", "fix_classes", "batch_audit", "easy_safety", "medium_attributes", "hard_missing"]
+MAX_STEPS_PER_TASK = {"fix_bboxes": 15, "fix_classes": 20, "batch_audit": 30, "easy_safety": 15, "medium_attributes": 20, "hard_missing": 30}
 TEMPERATURE = 0.2
 MAX_TOKENS = 1500
 SUCCESS_SCORE_THRESHOLD = 0.1
@@ -62,26 +62,31 @@ You are a highly precise AI visual inspector reviewing annotated datasets.
 You will be provided an image containing multiple drawn objects.
 Every object has a thick colored bounding box and a distinct label showing `[ID: <number> | <class_label>]`.
 
-Your task is to analyze EVERY SINGLE box drawn on the image systematically and check for two types of errors:
-1. WRONG CLASS: The box surrounds an actual object, but the text label inside the ribbon is incorrect (e.g. ribbon says `dog` but it's a `cat`).
-2. SPURIOUS/EMPTY: The box encircles nothing but empty space or background (e.g. wall, sky, street) and therefore should be deleted.
+Your task is to analyze EVERY SINGLE box drawn on the image systematically and check for errors, policy violations, incorrect attributes, or completely missing background objects.
 
-IF it tightly binds the object and the label is correct, its status is KEEP.
+IF the box tightly binds the object, the label is exactly correct, and it does not violate any safety policies, its status is KEEP.
 
 You MUST respond strictly with a line-by-line list grading every single ID you see on the screen.
+You may also append FLAG_MISSING commands at the very end of your list for objects that the annotator forgot to draw a box around.
+
 Use EXACTLY this format and nothing else:
 
 ID <number>: KEEP
 ID <number>: CHANGE_CLASS <new_correct_class_name>
 ID <number>: REMOVE
+ID <number>: FLAG_SAFETY
+ID <number>: CHANGE_ATTRIBUTE <new_attribute_name>
+FLAG_MISSING: <missing_class_name>
 
 Example Output:
 ID 0: KEEP
 ID 1: CHANGE_CLASS truck
 ID 2: REMOVE
-ID 3: KEEP
+ID 3: FLAG_SAFETY
 ID 14: KEEP
-ID 15: CHANGE_CLASS skateboard
+ID 15: CHANGE_ATTRIBUTE red skateboard
+FLAG_MISSING: person
+FLAG_MISSING: bicycle
 
 Do NOT Output any other text, no intro, no json, no explanation. Just the list.
 """).strip()
@@ -252,6 +257,18 @@ def parse_vqa_actions(response_text: str) -> List[AnnotationQAAction]:
     lines = text.split('\n')
     for line in lines:
         line = line.strip()
+
+        # 1. Check for FLAG_MISSING (which doesn't have an ID)
+        match_missing = re.search(r'FLAG_MISSING:\s*(.+)', line, re.IGNORECASE)
+        if match_missing:
+            m_class = match_missing.group(1).strip().lower()
+            actions.append(AnnotationQAAction(
+                action_type="flag_missing",
+                missing_class=m_class
+            ))
+            continue
+
+        # 2. Check for ID-based commands
         match = re.search(r'ID\s*(\d+)[:\-\s]+(.+)', line, re.IGNORECASE)
         if not match:
             continue
@@ -265,7 +282,6 @@ def parse_vqa_actions(response_text: str) -> List[AnnotationQAAction]:
                 annotation_id=ann_id
             ))
         elif instruction.startswith("CHANGE_CLASS") or instruction.startswith("CHANGE"):
-            # extract string after CHANGE_CLASS
             parts = instruction.split()
             if len(parts) > 1:
                 new_class = " ".join(parts[1:]).lower()
@@ -273,6 +289,20 @@ def parse_vqa_actions(response_text: str) -> List[AnnotationQAAction]:
                     action_type="change_class",
                     annotation_id=ann_id,
                     new_class=new_class
+                ))
+        elif instruction.startswith("FLAG_SAFETY"):
+            actions.append(AnnotationQAAction(
+                action_type="flag_safety",
+                annotation_id=ann_id
+            ))
+        elif instruction.startswith("CHANGE_ATTRIBUTE"):
+            parts = instruction.split()
+            if len(parts) > 1:
+                new_attr = " ".join(parts[1:]).lower()
+                actions.append(AnnotationQAAction(
+                    action_type="change_attribute",
+                    annotation_id=ann_id,
+                    new_attribute=new_attr
                 ))
                 
     return actions
@@ -328,9 +358,16 @@ def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> fl
                 break
                 
             steps_taken += 1
-            action_str = f"{action.action_type}(id={action.annotation_id})"
+            action_str = f"{action.action_type}("
+            if action.annotation_id is not None:
+                action_str += f"id={action.annotation_id}"
             if action.new_class:
-                action_str += f"[cls={action.new_class}]"
+                action_str += f" cls={action.new_class}"
+            if action.new_attribute:
+                action_str += f" attr={action.new_attribute}"
+            if action.missing_class:
+                action_str += f" missing={action.missing_class}"
+            action_str += ")"
 
             obs = env.step(action)
             reward = obs.reward if obs.reward is not None else 0.0

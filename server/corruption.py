@@ -367,4 +367,46 @@ def corrupt_annotations(
             existing_bboxes.append(spur["bbox"])
             log.append(f"Added spurious ann {spur['id']}")
 
+    elif difficulty == "easy_safety":
+        # Task: Safety / Policy Violation
+        # Provide uncorrupted boxes but VLM must flag certain items based on safety policy.
+        # Environment text will define "No humans" or similar. We don't corrupt the box.
+        pass
+
+    elif difficulty == "medium_attributes":
+        # Task: Attribute / Caption Audit
+        colors = ["red ", "blue ", "black ", "white ", "silver ", "yellow "]
+        corruption_rate = 0.50
+        n_corrupt = max(2, int(len(corrupted) * corruption_rate))
+        indices = list(range(len(corrupted)))
+        rng.shuffle(indices)
+        
+        for idx in indices:
+            ann = corrupted[idx]
+            old_cls = ann["class_label"]
+            correct_color = rng.choice(colors)
+            if idx in indices[:n_corrupt]:
+                # Corrupt it: assign wrong color prefix
+                wrong_color = rng.choice([c for c in colors if c != correct_color])
+                ann["class_label"] = wrong_color + old_cls
+                log.append(f"Attribute corrupted ann {ann['id']}: should be {correct_color}{old_cls}, is {wrong_color}{old_cls}")
+            else:
+                # Keep it "correct" with an attribute
+                ann["class_label"] = correct_color + old_cls
+
+    elif difficulty == "hard_missing":
+        # Task: Missing Contextual Annotations
+        # Delete 40% of annotations without adding spurious ones. VLM must list them as missing.
+        delete_rate = 0.40
+        n_delete = max(2, int(len(corrupted) * delete_rate))
+        indices = list(range(len(corrupted)))
+        rng.shuffle(indices)
+        delete_indices = indices[:n_delete]
+
+        for idx in delete_indices:
+            ann = corrupted[idx]
+            log.append(f"Missing Obj created: Removed ann {ann['id']} ({ann['class_label']})")
+            corrupted[idx] = None
+        corrupted = [a for a in corrupted if a is not None]
+
     return corrupted, log
