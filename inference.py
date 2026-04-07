@@ -1,15 +1,15 @@
 """
-Inference Script — Annotation QA Environment
-=============================================
+Inference Script — Annotation QA Environment (VLM Edition)
+==========================================================
 MANDATORY
 - Before submitting, ensure the following variables are defined:
-    API_BASE_URL   The API endpoint for the LLM.
+    API_BASE_URL   The API endpoint for the VLM.
     MODEL_NAME     The model identifier to use for inference.
     HF_TOKEN       Your Hugging Face / API key.
 
 - Defaults are set only for API_BASE_URL and MODEL_NAME:
     API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-    MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+    MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-VL-7B-Instruct")
 
 - The inference script must be named `inference.py` and placed in the root
 - Participants must use OpenAI Client for all LLM calls
@@ -21,13 +21,20 @@ STDOUT FORMAT
     [START] task=<task_name> env=<benchmark> model=<model_name>
     [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
     [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
+
+VLM APPROACH
+- Uses Qwen2.5-VL-7B-Instruct (Vision-Language Model) via OpenAI-compatible API
+- Images are downloaded from COCO val2017 public URLs and sent as base64
+- The VLM visually inspects the image to validate/correct annotations
 """
 
-import asyncio
+import base64
+import io
 import json
 import os
 import sys
 import textwrap
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -48,7 +55,7 @@ except ImportError:
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 HF_TOKEN = os.getenv("HF_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-VL-7B-Instruct")
 
 BENCHMARK = "annotation_qa_env"
 TASKS = ["fix_bboxes", "fix_classes", "batch_audit"]
@@ -57,16 +64,20 @@ TEMPERATURE = 0.3
 MAX_TOKENS = 500
 SUCCESS_SCORE_THRESHOLD = 0.1
 
+# Image cache: avoid re-downloading the same image across steps
+_image_cache: Dict[str, str] = {}
+
 SYSTEM_PROMPT = textwrap.dedent("""
-You are an AI annotation quality reviewer. You examine synthetic scene
-annotations and fix errors in bounding boxes and class labels.
+You are an AI annotation quality reviewer with vision capabilities.
+You can SEE the actual image and must use visual inspection to verify annotations.
 
 You will receive:
-1. A scene description with objects and their true positions
-2. Current annotations (some may have errors)
-3. Available classes
+1. The actual image of the scene
+2. Current annotations (some may have errors — wrong bboxes, wrong class, spurious, or missing)
+3. Available COCO object classes
 
-Your job: Compare annotations against the scene description and fix errors.
+Your job: Look at the image, compare what you actually see against the listed annotations,
+and fix any errors you find.
 
 AVAILABLE ACTIONS (respond with valid JSON):
 - {"action_type": "adjust_bbox", "annotation_id": <id>, "new_bbox": [x, y, w, h]}
@@ -75,14 +86,17 @@ AVAILABLE ACTIONS (respond with valid JSON):
 - {"action_type": "remove_annotation", "annotation_id": <id>}
 - {"action_type": "submit"}
 
-All bbox values are normalized to 0.0–1.0.
+All bbox values are normalized to 0.0–1.0 (fraction of image width/height).
+Format: [x_top_left, y_top_left, width, height]
 
 STRATEGY:
-1. Compare each annotation's bbox against the scene objects' bboxes
-2. Check if class labels match the scene objects
-3. Look for spurious annotations that don't match any scene object
-4. Look for scene objects that have no annotation
-5. Fix errors one at a time, then submit
+1. Look at the image carefully
+2. For each annotation, check if the bbox tightly covers a real object at that location
+3. Check if the class label matches what you see in the image
+4. Look for annotations covering empty areas (spurious — remove them)
+5. Look for visible objects that have no annotation (add them)
+6. Fix errors one at a time, most impactful first
+7. When all annotations look correct, submit
 
 RESPOND WITH ONLY A SINGLE JSON ACTION, no explanation.
 """).strip()
@@ -114,15 +128,82 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 
 
 # ──────────────────────────────────────────────
-# Prompt building
+# Image handling
 # ──────────────────────────────────────────────
 
-def build_user_prompt(obs: AnnotationQAObservation) -> str:
-    """Build the user prompt from the observation."""
-    # Format scene objects
-    scene_desc = obs.scene_description
+def fetch_image_as_base64(image_url: str, max_dim: int = 640) -> str:
+    """
+    Download a COCO image and return as a base64-encoded JPEG string.
+    
+    Resizes to max_dim on the longest side to optimize for VLM input
+    (Qwen2.5-VL works best at 448-768px). Caches results in memory.
+    """
+    if image_url in _image_cache:
+        return _image_cache[image_url]
 
-    # Format current annotations
+    try:
+        # Download the image
+        req = urllib.request.Request(
+            image_url,
+            headers={"User-Agent": "AnnotationQA/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            img_bytes = resp.read()
+
+        # Resize using PIL if available
+        try:
+            from PIL import Image
+
+            img = Image.open(io.BytesIO(img_bytes))
+
+            # Resize to max_dim on longest side
+            w, h = img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+
+            # Convert to JPEG bytes
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            img_bytes = buf.getvalue()
+        except ImportError:
+            # PIL not available — send raw image bytes
+            pass
+
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        _image_cache[image_url] = b64
+        return b64
+
+    except Exception as e:
+        print(f"[DEBUG] Failed to fetch image {image_url}: {e}", flush=True)
+        return ""
+
+
+# ──────────────────────────────────────────────
+# Prompt building (multimodal)
+# ──────────────────────────────────────────────
+
+def build_user_content(obs: AnnotationQAObservation) -> list:
+    """
+    Build multimodal user content for the VLM.
+    Returns a list of content blocks (text + image) in OpenAI format.
+    """
+    content_blocks = []
+
+    # 1. Image block (if available)
+    if obs.image_url:
+        b64 = fetch_image_as_base64(obs.image_url)
+        if b64:
+            content_blocks.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{b64}",
+                },
+            })
+
+    # 2. Text block with annotation context
     ann_lines = []
     for ann in obs.annotations:
         ann_lines.append(
@@ -131,7 +212,7 @@ def build_user_prompt(obs: AnnotationQAObservation) -> str:
         )
     annotations_str = "\n".join(ann_lines) if ann_lines else "  (none)"
 
-    # Format scene ground truth objects
+    # Scene objects from ground truth (these give the agent context)
     obj_lines = []
     for obj in obs.scene_objects:
         bbox = obj.get("bbox", [0, 0, 0, 0])
@@ -141,27 +222,33 @@ def build_user_prompt(obs: AnnotationQAObservation) -> str:
         )
     objects_str = "\n".join(obj_lines) if obj_lines else "  (none)"
 
-    prompt = f"""Task: {obs.task_description}
+    text = f"""Task: {obs.task_description}
 Step {obs.step_count}/{obs.max_steps} | Corrections made: {obs.corrections_made}
+Image: {obs.image_width}×{obs.image_height} pixels
 Feedback: {obs.message}
 
-SCENE OBJECTS (ground truth):
+SCENE OBJECTS (ground truth from COCO):
 {objects_str}
 
-CURRENT ANNOTATIONS (may have errors):
+CURRENT ANNOTATIONS (may have errors — compare with what you SEE in the image):
 {annotations_str}
 
-AVAILABLE CLASSES: {', '.join(obs.available_classes)}
+AVAILABLE CLASSES: {', '.join(obs.available_classes[:20])}... ({len(obs.available_classes)} total COCO classes)
 
-Compare annotations against scene objects. Find and fix ONE error, or submit if all are correct.
+Look at the image. Compare each annotation's bbox and class against what you actually see.
+Fix ONE error, or submit if all annotations are correct.
 Respond with a single JSON action."""
 
-    return prompt
+    content_blocks.append({
+        "type": "text",
+        "text": text,
+    })
+
+    return content_blocks
 
 
 def parse_llm_response(response_text: str) -> AnnotationQAAction:
     """Parse the LLM's JSON response into an action."""
-    # Try to extract JSON from the response
     text = response_text.strip()
 
     # Handle common LLM formatting issues
@@ -183,7 +270,6 @@ def parse_llm_response(response_text: str) -> AnnotationQAAction:
             try:
                 data = json.loads(json_match.group())
             except json.JSONDecodeError:
-                # Fallback: submit
                 return AnnotationQAAction(action_type="submit")
         else:
             return AnnotationQAAction(action_type="submit")
@@ -197,22 +283,22 @@ def parse_llm_response(response_text: str) -> AnnotationQAAction:
 
 
 # ──────────────────────────────────────────────
-# LLM interaction
+# LLM interaction (VLM multimodal)
 # ──────────────────────────────────────────────
 
 def get_model_action(
     client: OpenAI,
     obs: AnnotationQAObservation,
 ) -> AnnotationQAAction:
-    """Query the LLM for the next action."""
-    user_prompt = build_user_prompt(obs)
+    """Query the VLM for the next action using image + text."""
+    user_content = build_user_content(obs)
 
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
@@ -231,6 +317,9 @@ def get_model_action(
 
 def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> float:
     """Run a single task and return the score."""
+    global _image_cache
+    _image_cache = {}  # Clear image cache between tasks
+
     max_steps = MAX_STEPS_PER_TASK.get(task_name, 20)
     rewards: List[float] = []
     steps_taken = 0
@@ -242,13 +331,12 @@ def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> fl
     try:
         # Reset environment with the specific task
         obs = env.reset(task=task_name, seed=42)
-        last_reward = 0.0
 
         for step in range(1, max_steps + 1):
             if obs.done:
                 break
 
-            # Get action from LLM
+            # Get action from VLM
             action = get_model_action(client, obs)
             action_str = f"{action.action_type}"
             if action.annotation_id is not None:
@@ -263,7 +351,6 @@ def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> fl
 
             rewards.append(reward)
             steps_taken = step
-            last_reward = reward
 
             log_step(
                 step=step,
@@ -276,9 +363,9 @@ def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> fl
             if done:
                 break
 
-        # Compute final score: use the last reward (which is the grader score on submit/timeout)
+        # Compute final score
         if rewards:
-            score = rewards[-1]  # Last reward is the final grade
+            score = rewards[-1]
         score = max(0.0, min(1.0, score))
         success = score >= SUCCESS_SCORE_THRESHOLD
 
@@ -292,14 +379,14 @@ def run_task(client: OpenAI, env: AnnotationQAEnvironment, task_name: str) -> fl
 
 
 def main() -> None:
-    """Run inference on all 3 tasks."""
+    """Run inference on all 3 tasks using VLM."""
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     env = AnnotationQAEnvironment()
 
     total_score = 0.0
     for task_name in TASKS:
         print(f"\n{'='*60}", flush=True)
-        print(f"Running task: {task_name}", flush=True)
+        print(f"Running task: {task_name} (VLM: {MODEL_NAME})", flush=True)
         print(f"{'='*60}", flush=True)
         score = run_task(client, env, task_name)
         total_score += score

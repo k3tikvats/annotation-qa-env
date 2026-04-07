@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openenv-annotation-qa-env"
-version = "0.1.0"
-description = "Annotation QA Environment for OpenEnv — AI agent reviews and corrects flawed ML annotations"
+version = "0.2.0"
+description = "Annotation QA Environment for OpenEnv — AI agent reviews and corrects flawed ML annotations on real COCO val2017 images using a VLM"
 requires-python = ">=3.10"
 dependencies = [
     # Core OpenEnv dependencies
@@ -14,7 +14,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "uvicorn>=0.24.0",
     "requests>=2.31.0",
-    "openai>=1.0.0"
+    "openai>=1.0.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]

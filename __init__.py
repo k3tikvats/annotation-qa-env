@@ -1,8 +1,8 @@
 """
 Annotation QA Environment — A real-world OpenEnv for ML annotation quality assurance.
 
-This environment exposes an AI agent to intentionally-flawed annotations on
-synthetic scenes, challenging it to detect and correct errors.
+This environment uses real COCO val2017 images and challenges a VLM agent
+to detect and correct intentional errors in the annotations.
 """
 
 from .client import AnnotationQAEnv

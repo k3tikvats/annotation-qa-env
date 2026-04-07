@@ -1,7 +1,7 @@
 """
 Grading utilities for the Annotation QA Environment.
 
-Provides deterministic scoring (0.0–1.0) based on:
+Provides deterministic scoring (0.0-1.0) based on:
 - IoU (Intersection over Union) of bounding boxes
 - Class label accuracy
 - Precision (penalizes spurious annotations)

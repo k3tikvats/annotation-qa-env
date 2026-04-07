@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies (minimal — no OpenCV needed)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -11,11 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY server/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all environment code
+# Copy all environment code (includes pre-processed COCO JSON data ~2.5MB)
 COPY . /app/
-
-# Generate the dataset at build time (deterministic, <1MB)
-RUN python -m data.generate_dataset
 
 # Set PYTHONPATH
 ENV PYTHONPATH="/app:$PYTHONPATH"

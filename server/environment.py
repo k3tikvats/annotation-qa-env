@@ -6,7 +6,7 @@ Implements the OpenEnv 3-method interface:
 - step(action) → Observation
 - state → State
 
-The agent reviews intentionally-flawed annotations on synthetic scenes
+The agent reviews intentionally-flawed annotations on real COCO val2017 images
 and must correct bounding boxes, fix class labels, add missing annotations,
 or remove spurious ones. Dense reward is provided at every step.
 """
@@ -57,7 +57,8 @@ TASK_CONFIGS = {
             "Fix bounding box errors in the annotations. Some boxes are too large, "
             "shifted to the wrong position, too small, or completely missing. "
             "There may also be spurious annotations that don't correspond to any object. "
-            "Adjust bounding boxes, remove spurious annotations, and add any missing ones."
+            "Adjust bounding boxes, remove spurious annotations, and add any missing ones. "
+            "You can see the actual image — use visual inspection to judge correctness."
         ),
         "difficulty": "easy",
         "max_steps": 15,
@@ -68,7 +69,8 @@ TASK_CONFIGS = {
             "Fix both bounding box AND class label errors. Some annotations have the "
             "wrong class label (e.g., a 'car' labeled as 'truck', or a 'dog' labeled as 'cat'). "
             "Additionally, some bounding boxes are wrong. Fix class labels, adjust bounding "
-            "boxes, remove spurious annotations, and add missing ones."
+            "boxes, remove spurious annotations, and add missing ones. "
+            "You can see the actual image — use visual inspection to judge correctness."
         ),
         "difficulty": "medium",
         "max_steps": 20,
@@ -79,7 +81,8 @@ TASK_CONFIGS = {
             "Perform a batch consistency audit across multiple scenes. Fix annotation "
             "errors including subtle bounding box shifts, similar-class confusions "
             "(car vs truck, dog vs cat), missing annotations, and spurious annotations. "
-            "Errors are more subtle than in previous tasks."
+            "Errors are more subtle than in previous tasks. "
+            "You can see the actual image — use visual inspection to judge correctness."
         ),
         "difficulty": "hard",
         "max_steps": 30,
@@ -92,8 +95,9 @@ class AnnotationQAEnvironment:
     """
     Annotation QA Environment following the OpenEnv pattern.
 
-    The agent reviews synthetic scene annotations that contain intentional
-    errors and must correct them through a series of actions.
+    The agent reviews real COCO val2017 image annotations that contain
+    intentional errors and must correct them through a series of actions.
+    A VLM is used to visually inspect the images.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -122,12 +126,10 @@ class AnnotationQAEnvironment:
         data_file = self._data_dir / config["data_file"]
 
         if not data_file.exists():
-            # Generate data on-the-fly if not pre-generated
-            try:
-                from ..data.generate_dataset import generate_all_tasks
-            except ImportError:
-                from data.generate_dataset import generate_all_tasks
-            generate_all_tasks(str(self._data_dir))
+            raise FileNotFoundError(
+                f"Task data file not found: {data_file}. "
+                f"Run 'python -m data.prepare_coco' to generate the COCO dataset."
+            )
 
         with open(data_file, "r") as f:
             data = json.load(f)
@@ -205,7 +207,7 @@ class AnnotationQAEnvironment:
         return self._build_observation(
             reward=None,
             message=(
-                f"Review the annotations for this {scene.get('scene_type', 'scene')}. "
+                f"Review the annotations for this COCO image. "
                 f"There are {len(self._current_annotations)} annotations. "
                 f"Some may have incorrect bounding boxes, wrong class labels, "
                 f"or be entirely spurious. Some objects may be missing annotations. "
@@ -432,12 +434,17 @@ class AnnotationQAEnvironment:
         return AnnotationQAObservation(
             done=self._done,
             reward=reward,
+            # Image info from COCO
+            image_url=self._scene_data.get("image_url"),
+            image_width=self._scene_data.get("image_width", 0),
+            image_height=self._scene_data.get("image_height", 0),
+            # Scene info
             scene_description=self._scene_data.get("scene_description", ""),
             scene_objects=[
                 {
                     "id": obj["id"],
                     "class_label": obj["class_label"],
-                    "position": obj["position"],
+                    "position": obj.get("position", ""),
                     "bbox": obj["bbox"],
                 }
                 for obj in self._scene_data.get("objects", [])

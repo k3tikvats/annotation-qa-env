@@ -3,12 +3,13 @@ Annotation QA Environment — Type-Safe Models.
 
 Defines the API contract for the Annotation QA Environment:
 - AnnotationQAAction: What corrections the agent can make
-- AnnotationQAObservation: What the agent sees (scene + annotations)
+- AnnotationQAObservation: What the agent sees (image + annotations)
 - AnnotationQAState: Episode metadata
 
-The agent reviews intentionally-flawed annotations on synthetic scenes
+The agent reviews intentionally-flawed annotations on real COCO val2017 images
 and must fix bounding boxes, correct class labels, add missing annotations,
-or remove spurious ones.
+or remove spurious ones. A VLM (Vision-Language Model) is used to visually
+inspect the images.
 """
 
 from typing import Any, Dict, List, Literal, Optional
@@ -77,15 +78,23 @@ class AnnotationQAObservation(BaseModel):
     """
     What the agent sees after each step.
 
-    Includes the scene description, current annotations (some may be wrong),
-    available classes, and progress info.
+    Includes the image URL, scene description, current annotations (some may
+    be wrong), available classes, and progress info. The VLM agent uses the
+    image_url to visually inspect the scene.
     """
     done: bool = False
     reward: Optional[float] = None
 
+    # Image information (real COCO val2017)
+    image_url: Optional[str] = Field(
+        None, description="Public URL to the COCO val2017 image"
+    )
+    image_width: int = Field(0, description="Image width in pixels")
+    image_height: int = Field(0, description="Image height in pixels")
+
     # Scene information
     scene_description: str = Field(
-        "", description="Natural-language description of the scene"
+        "", description="Natural-language description of the scene and its objects"
     )
     scene_objects: List[Dict[str, Any]] = Field(
         default_factory=list,
@@ -101,7 +110,7 @@ class AnnotationQAObservation(BaseModel):
     # Task context
     available_classes: List[str] = Field(
         default_factory=list,
-        description="Valid class labels for this task",
+        description="Valid class labels for this task (COCO 80 categories)",
     )
     task_id: str = ""
     task_description: str = ""
